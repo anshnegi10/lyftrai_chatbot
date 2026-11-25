@@ -7,9 +7,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 from litellm.exceptions import (
+    APIConnectionError,
     AuthenticationError,
     BadRequestError,
     InternalServerError,
+    NotFoundError,
     RateLimitError,
     ServiceUnavailableError,
     Timeout,
@@ -18,6 +20,14 @@ from litellm.exceptions import (
 from app import config
 from app.config import parse_cors_origins, Settings
 from app.services import conversation_service as conv_svc
+from app.services.llm_service import (
+    ERROR_CATEGORY_ALL_EXHAUSTED,
+    ERROR_CATEGORY_BAD_REQUEST,
+    ERROR_CATEGORY_INVALID_KEY,
+    ERROR_CATEGORY_MODEL_NOT_FOUND,
+    ERROR_CATEGORY_QUOTA,
+    ERROR_CATEGORY_TIMEOUT,
+)
 from tests.conftest import make_mock_response
 
 
@@ -372,3 +382,194 @@ class TestHealthSanitization:
             assert resp.json()["detail"] == "Database unreachable"
             assert "sensitive" not in resp.text
             assert "secret.db" not in resp.text
+
+
+# ===========================================================================
+# 6. Provider Readiness Endpoint (/health/provider)
+# ===========================================================================
+
+
+class TestProviderHealthEndpoint:
+    def test_provider_health_returns_configured(self, client):
+        resp = client.get("/health/provider")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "configured"
+        assert body["keys_configured"] == 2
+        assert "gemini" in body["model"]
+        assert "note" in body
+        # Does NOT make a live API call
+
+    def test_provider_health_no_keys_returns_503(self, client):
+        orig_1 = config.settings.GEMINI_API_KEY_1
+        orig_2 = config.settings.GEMINI_API_KEY_2
+        try:
+            config.settings.GEMINI_API_KEY_1 = ""
+            config.settings.GEMINI_API_KEY_2 = ""
+            resp = client.get("/health/provider")
+            assert resp.status_code == 503
+            body = resp.json()
+            assert body["detail"]["status"] == "misconfigured"
+            assert len(body["detail"]["issues"]) >= 1
+        finally:
+            config.settings.GEMINI_API_KEY_1 = orig_1
+            config.settings.GEMINI_API_KEY_2 = orig_2
+
+    def test_provider_health_reports_simulation_flag(self, client):
+        resp = client.get("/health/provider")
+        assert resp.status_code == 200
+        # Must report whether failure simulation is on/off; it must be off in default test env
+        body = resp.json()
+        assert "failure_simulation_enabled" in body
+
+
+# ===========================================================================
+# 7. Extended Failover – Rate limits, Auth, Network, Retired model
+# ===========================================================================
+
+
+class TestExtendedFailoverScenarios:
+    @patch("app.services.llm_service.litellm.acompletion", new_callable=AsyncMock)
+    def test_key1_rate_limit_429_uses_key2(self, mock_llm, client):
+        """429 on key 1 must trigger failover; metadata must report key_2 and fallback_attempts=1."""
+        def side_effect(*args, **kwargs):
+            if kwargs.get("api_key") == "test-key-1":
+                raise RateLimitError(
+                    message="Quota exceeded 429",
+                    model=config.settings.GEMINI_MODEL,
+                    llm_provider="google",
+                )
+            return make_mock_response(content="key2 answered")
+
+        mock_llm.side_effect = side_effect
+        resp = client.post("/chat", json={"session_id": "s-rl-429", "message": "hello"})
+        assert resp.status_code == 200
+        meta = resp.json()["metadata"]
+        assert meta["key_id"] == "key_2"
+        assert meta["fallback_attempts"] == 1
+        assert meta["resolution_source"] == "LIVE_INFERENCE"
+
+    @patch("app.services.llm_service.litellm.acompletion", new_callable=AsyncMock)
+    def test_both_keys_rate_limited_returns_503_with_correct_detail(self, mock_llm, client):
+        """When both keys hit 429, the response must be HTTP 503 with the standard detail."""
+        mock_llm.side_effect = RateLimitError(
+            message="All quota exhausted",
+            model=config.settings.GEMINI_MODEL,
+            llm_provider="google",
+        )
+        resp = client.post("/chat", json={"session_id": "s-both-rl", "message": "hello"})
+        assert resp.status_code == 503
+        assert resp.json()["detail"] == "all providers unavailable"
+        # Both keys must have been tried (call count = 2)
+        assert mock_llm.call_count == 2
+
+    @patch("app.services.llm_service.litellm.acompletion", new_callable=AsyncMock)
+    def test_invalid_key1_auth_error_fails_over_to_key2(self, mock_llm, client):
+        """AuthenticationError on key 1 (invalid key) must NOT block key 2."""
+        def side_effect(*args, **kwargs):
+            if kwargs.get("api_key") == "test-key-1":
+                raise AuthenticationError(
+                    message="Invalid API key provided",
+                    model=config.settings.GEMINI_MODEL,
+                    llm_provider="google",
+                )
+            return make_mock_response(content="key2 auth ok")
+
+        mock_llm.side_effect = side_effect
+        resp = client.post("/chat", json={"session_id": "s-auth-fail", "message": "hi"})
+        assert resp.status_code == 200
+        meta = resp.json()["metadata"]
+        assert meta["key_id"] == "key_2"
+        assert meta["fallback_attempts"] == 1
+
+    @patch("app.services.llm_service.litellm.acompletion", new_callable=AsyncMock)
+    def test_retired_model_not_found_returns_404_no_failover(self, mock_llm, client):
+        """NotFoundError (retired model) must NOT failover and must return a clear HTTP 404."""
+        mock_llm.side_effect = NotFoundError(
+            message="Model gemini/gemini-2.0-flash has been retired",
+            model=config.settings.GEMINI_MODEL,
+            llm_provider="google",
+        )
+        resp = client.post("/chat", json={"session_id": "s-retired", "message": "hello"})
+        assert resp.status_code == 404
+        # Only one key should have been tried — NotFoundError is not retryable
+        assert mock_llm.call_count == 1
+        body = resp.json()
+        # Detail must mention the model clearly, never expose an API key
+        assert "model" in body["detail"].lower() or "retired" in body["detail"].lower() or "not found" in body["detail"].lower()
+        assert "test-key-1" not in body["detail"]
+
+    @patch("app.services.llm_service.litellm.acompletion", new_callable=AsyncMock)
+    def test_network_timeout_fails_over_to_key2(self, mock_llm, client):
+        """Network timeout on key 1 must trigger failover to key 2."""
+        async def side_effect(*args, **kwargs):
+            if kwargs.get("api_key") == "test-key-1":
+                raise Timeout(
+                    message="Request timed out",
+                    model=config.settings.GEMINI_MODEL,
+                    llm_provider="google",
+                )
+            return make_mock_response(content="ok after timeout")
+
+        mock_llm.side_effect = side_effect
+        resp = client.post("/chat", json={"session_id": "s-net-timeout", "message": "hello"})
+        assert resp.status_code == 200
+        meta = resp.json()["metadata"]
+        assert meta["key_id"] == "key_2"
+        assert meta["fallback_attempts"] == 1
+
+    @patch("app.services.llm_service.litellm.acompletion", new_callable=AsyncMock)
+    def test_provider_500_fails_over_to_key2(self, mock_llm, client):
+        """HTTP 500 from provider on key 1 must trigger failover."""
+        def side_effect(*args, **kwargs):
+            if kwargs.get("api_key") == "test-key-1":
+                raise InternalServerError(
+                    message="Internal Server Error 500",
+                    model=config.settings.GEMINI_MODEL,
+                    llm_provider="google",
+                )
+            return make_mock_response(content="key2 ok after 500")
+
+        mock_llm.side_effect = side_effect
+        resp = client.post("/chat", json={"session_id": "s-500-k2", "message": "hello"})
+        assert resp.status_code == 200
+        meta = resp.json()["metadata"]
+        assert meta["key_id"] == "key_2"
+        assert meta["fallback_attempts"] == 1
+
+    @patch("app.services.llm_service.litellm.acompletion", new_callable=AsyncMock)
+    def test_model_selection_uses_gemini_3_5_flash(self, mock_llm, client):
+        """The model passed to litellm must be gemini/gemini-3.5-flash."""
+        mock_llm.return_value = make_mock_response(content="ok")
+        resp = client.post("/chat", json={"session_id": "s-model-check", "message": "ping"})
+        assert resp.status_code == 200
+        called_model = mock_llm.call_args[1]["model"]
+        assert called_model == "gemini/gemini-3.5-flash"
+        assert resp.json()["metadata"]["model"] == "gemini/gemini-3.5-flash"
+
+    @patch("app.services.llm_service.litellm.acompletion", new_callable=AsyncMock)
+    def test_cache_hit_metadata_has_null_key_and_zero_fallback(self, mock_llm, client):
+        """On a cache hit, key_id must be null and fallback_attempts must be 0."""
+        mock_llm.return_value = make_mock_response(content="cached", cache_hit=True)
+        resp = client.post("/chat", json={"session_id": "s-cache-meta", "message": "hi"})
+        assert resp.status_code == 200
+        meta = resp.json()["metadata"]
+        assert meta["resolution_source"] == "LLM_CACHE"
+        assert meta["key_id"] is None
+        assert meta["fallback_attempts"] == 0
+
+    @patch("app.services.llm_service.litellm.acompletion", new_callable=AsyncMock)
+    def test_credentials_never_exposed_in_response_or_detail(self, mock_llm, client, caplog):
+        """API key values must never appear in HTTP responses or log records."""
+        mock_llm.side_effect = ServiceUnavailableError(
+            message=f"Service down. Key: test-key-1, also test-key-2 failed",
+            model=config.settings.GEMINI_MODEL,
+            llm_provider="google",
+        )
+        resp = client.post("/chat", json={"session_id": "s-cred-leak", "message": "leak"})
+        assert resp.status_code == 503
+        assert "test-key-1" not in resp.text
+        assert "test-key-2" not in resp.text
+        for rec in caplog.records:
+            assert "test-key-1" not in rec.message
+            assert "test-key-2" not in rec.message

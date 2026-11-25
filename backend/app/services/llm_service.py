@@ -27,18 +27,33 @@ logger = logging.getLogger(__name__)
 
 RETRYABLE_STATUS_CODES = {401, 403, 408, 429, 500, 502, 503, 504}
 
+# Human-readable error categories exposed in structured errors (never includes keys)
+ERROR_CATEGORY_INVALID_KEY = "invalid_api_key"
+ERROR_CATEGORY_QUOTA = "quota_exceeded"
+ERROR_CATEGORY_MODEL_NOT_FOUND = "model_not_found"
+ERROR_CATEGORY_TIMEOUT = "timeout"
+ERROR_CATEGORY_PROVIDER_UNAVAILABLE = "provider_unavailable"
+ERROR_CATEGORY_BAD_REQUEST = "bad_request"
+ERROR_CATEGORY_ALL_EXHAUSTED = "all_providers_exhausted"
+
 
 class AllProvidersFailedError(Exception):
     """Raised when every configured API key has failed or no keys are configured."""
+
+    def __init__(self, message: str = "all providers unavailable", category: str = ERROR_CATEGORY_ALL_EXHAUSTED) -> None:
+        super().__init__(message)
+        self.message = message
+        self.category = category
 
 
 class ProviderClientError(Exception):
     """Raised for non-retryable provider errors (4xx client/content-policy errors)."""
 
-    def __init__(self, message: str, status_code: int = 400) -> None:
+    def __init__(self, message: str, status_code: int = 400, category: str = ERROR_CATEGORY_BAD_REQUEST) -> None:
         super().__init__(message)
         self.message = message
         self.status_code = status_code
+        self.category = category
 
 
 # ---------------------------------------------------------------------------
@@ -258,15 +273,41 @@ async def call_with_failover(
             raise
         except Exception as exc:
             scrubbed = scrub_secrets(str(exc))
-            if isinstance(exc, (BadRequestError, NotFoundError)):
-                default_code = 404 if isinstance(exc, NotFoundError) else 400
-                logger.warning("Key %s returned non-retryable client error: %s", key_id, scrubbed)
+            if isinstance(exc, NotFoundError):
+                # NotFoundError = model retired/removed — do NOT failover, give clear message
+                logger.warning(
+                    "Key %s returned NotFoundError (model retired or not available): %s",
+                    key_id, scrubbed,
+                )
                 raise ProviderClientError(
-                    message=scrubbed, status_code=getattr(exc, "status_code", default_code)
+                    message=(
+                        f"The configured model '{settings.GEMINI_MODEL}' was not found or has been retired. "
+                        "Update GEMINI_MODEL to a currently supported model."
+                    ),
+                    status_code=404,
+                    category=ERROR_CATEGORY_MODEL_NOT_FOUND,
+                )
+            if isinstance(exc, BadRequestError):
+                logger.warning("Key %s returned non-retryable BadRequest: %s", key_id, scrubbed)
+                raise ProviderClientError(
+                    message=scrubbed,
+                    status_code=getattr(exc, "status_code", 400),
+                    category=ERROR_CATEGORY_BAD_REQUEST,
                 )
 
             if is_retryable_error(exc):
-                logger.warning("Key %s failed with retryable error: %s", key_id, scrubbed)
+                # Classify into human-readable categories for logging (never expose keys)
+                if isinstance(exc, (AuthenticationError, PermissionDeniedError)):
+                    cat = ERROR_CATEGORY_INVALID_KEY
+                elif isinstance(exc, RateLimitError):
+                    cat = ERROR_CATEGORY_QUOTA
+                elif isinstance(exc, (Timeout, asyncio.TimeoutError, httpx.TimeoutException)):
+                    cat = ERROR_CATEGORY_TIMEOUT
+                else:
+                    cat = ERROR_CATEGORY_PROVIDER_UNAVAILABLE
+                logger.warning(
+                    "Key %s failed [%s] with retryable error: %s", key_id, cat, scrubbed
+                )
                 last_error = exc
                 continue
 

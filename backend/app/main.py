@@ -60,7 +60,10 @@ app.add_middleware(
 
 
 # ---------------------------------------------------------------------------
-# Health endpoint
+# Health endpoint — application + database readiness only
+# Note: keys_configured = number of non-empty key env vars; it does NOT verify
+# that the keys are valid or that the Gemini API is reachable.  Use
+# GET /health/provider for a lightweight provider configuration check.
 # ---------------------------------------------------------------------------
 @app.get("/health")
 def health():
@@ -84,6 +87,44 @@ def health():
         "status": "ok",
         "keys_configured": keys_configured,
         "cache_enabled": is_cache_enabled(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Provider readiness check — verifies Gemini config WITHOUT consuming quota
+# Returns the configured model, number of keys, and failure simulation status.
+# Does NOT make a real API call; a 200 here means config looks valid, not that
+# the Gemini endpoint is reachable.
+# ---------------------------------------------------------------------------
+@app.get("/health/provider")
+def health_provider():
+    keys_configured = sum(
+        1
+        for k in (settings.GEMINI_API_KEY_1, settings.GEMINI_API_KEY_2)
+        if k and k.strip()
+    )
+
+    issues = []
+    if keys_configured == 0:
+        issues.append("No Gemini API keys configured (GEMINI_API_KEY_1 / GEMINI_API_KEY_2 are empty)")
+    if not settings.GEMINI_MODEL or not settings.GEMINI_MODEL.strip():
+        issues.append("GEMINI_MODEL is not set")
+
+    if issues:
+        raise HTTPException(
+            status_code=503,
+            detail={"status": "misconfigured", "issues": issues},
+        )
+
+    return {
+        "status": "configured",
+        "model": settings.GEMINI_MODEL,
+        "keys_configured": keys_configured,
+        "failure_simulation_enabled": settings.ENABLE_FAILURE_SIMULATION,
+        "note": (
+            "This check verifies env-var configuration only. "
+            "It does not make a live Gemini API call."
+        ),
     }
 
 
