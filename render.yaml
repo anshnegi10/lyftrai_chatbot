@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: lyftr-ai-backend
+    runtime: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    rootDir: backend
+    envVars:
+      - key: GEMINI_API_KEY_1
+        sync: false
+      - key: GEMINI_API_KEY_2
+        sync: false
+      - key: DATABASE_URL
+        value: sqlite:////data/app.db
+      - key: ENABLE_FAILURE_SIMULATION
+        value: "true"
+      - key: CORS_ORIGINS
+        value: "*"
+      - key: LOG_LEVEL
+        value: "INFO"
+    disk:
+      name: lyftr-data
+      mountPath: /data
+      sizeGB: 1
