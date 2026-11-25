@@ -3,9 +3,9 @@ services:
     name: lyftr-ai-backend
     runtime: python
     region: oregon
-    # Note on Render plans: Persistent disks require 'plan: starter' ($7/mo).
-    # If deploying on Render's 'free' plan, remove the 'disk' block below and set DATABASE_URL to sqlite:////tmp/app.db (ephemeral).
-    plan: starter
+    # Free plan (ephemeral SQLite in /tmp). For persistent storage across restarts,
+    # upgrade to 'plan: starter', set DATABASE_URL to sqlite:////data/app.db, and add a disk block at /data.
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     rootDir: backend
@@ -18,17 +18,13 @@ services:
       - key: GEMINI_API_KEY_2
         sync: false
       - key: GEMINI_MODEL
-        value: gemini/gemini-2.0-flash
+        value: gemini/gemini-2.5-flash
       - key: DATABASE_URL
-        value: sqlite:////data/app.db
+        value: sqlite:////tmp/app.db
       - key: ENABLE_FAILURE_SIMULATION
-        value: "false"
+        value: "true"
       - key: CORS_ORIGINS
         # Replace with your deployed Vercel frontend origin
-        value: "https://your-frontend.vercel.app"
+        value: "*"
       - key: LOG_LEVEL
         value: "INFO"
-    disk:
-      name: lyftr-data
-      mountPath: /data
-      sizeGB: 1
