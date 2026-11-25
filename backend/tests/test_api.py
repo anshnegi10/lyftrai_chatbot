@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from tests.conftest import make_mock_response
+from app.config import settings
 
 
 # ===========================================================================
@@ -67,7 +68,7 @@ class TestChatHappyPath:
         assert body["reply"] == "Hi there!"
         meta = body["metadata"]
         assert meta["resolution_source"] == "LIVE_INFERENCE"
-        assert meta["model"] == "gemini/gemini-2.0-flash"
+        assert meta["model"] == settings.GEMINI_MODEL
         assert isinstance(meta["latency_ms"], int)
         assert meta["input_tokens"] == 10
         assert meta["output_tokens"] == 8

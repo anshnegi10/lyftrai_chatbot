@@ -14,6 +14,7 @@ from litellm.exceptions import (
     AuthenticationError,
     BadRequestError,
     InternalServerError,
+    NotFoundError,
     PermissionDeniedError,
     RateLimitError,
     ServiceUnavailableError,
@@ -257,10 +258,11 @@ async def call_with_failover(
             raise
         except Exception as exc:
             scrubbed = scrub_secrets(str(exc))
-            if isinstance(exc, BadRequestError):
-                logger.warning("Key %s returned non-retryable BadRequest: %s", key_id, scrubbed)
+            if isinstance(exc, (BadRequestError, NotFoundError)):
+                default_code = 404 if isinstance(exc, NotFoundError) else 400
+                logger.warning("Key %s returned non-retryable client error: %s", key_id, scrubbed)
                 raise ProviderClientError(
-                    message=scrubbed, status_code=getattr(exc, "status_code", 400)
+                    message=scrubbed, status_code=getattr(exc, "status_code", default_code)
                 )
 
             if is_retryable_error(exc):

@@ -10,7 +10,7 @@ services:
     environment:
       - GEMINI_API_KEY_1=${GEMINI_API_KEY_1}
       - GEMINI_API_KEY_2=${GEMINI_API_KEY_2}
-      - GEMINI_MODEL=${GEMINI_MODEL:-gemini/gemini-2.0-flash}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini/gemini-3.5-flash}
       - DATABASE_URL=sqlite:////data/app.db
       - ENABLE_FAILURE_SIMULATION=${ENABLE_FAILURE_SIMULATION:-true}
       - CORS_ORIGINS=${CORS_ORIGINS:-*}

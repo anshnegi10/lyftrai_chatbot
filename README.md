@@ -37,7 +37,7 @@ Features sequential multi-key failover across Gemini API keys, process-local in-
                       ▼
        ┌───────────────────────────────┐
        │       Google Gemini API       │
-       │  (gemini/gemini-2.0-flash)    │
+       │  (gemini/gemini-3.5-flash)    │
        └───────────────────────────────┘
 ```
 
@@ -71,7 +71,7 @@ Executes chat completion with multi-key failover and caching.
     "reply": "The capital of France is Paris.",
     "metadata": {
       "resolution_source": "LIVE_INFERENCE",
-      "model": "gemini/gemini-2.0-flash",
+      "model": "gemini/gemini-3.5-flash",
       "latency_ms": 780,
       "input_tokens": 28,
       "output_tokens": 8,
@@ -85,7 +85,7 @@ Executes chat completion with multi-key failover and caching.
   {
     "metadata": {
       "resolution_source": "LLM_CACHE",
-      "model": "gemini/gemini-2.0-flash",
+      "model": "gemini/gemini-3.5-flash",
       "latency_ms": 1,
       "input_tokens": 28,
       "output_tokens": 8,
@@ -172,7 +172,7 @@ System monitoring and container readiness probe.
 | :--- | :--- | :--- | :--- |
 | `GEMINI_API_KEY_1` | Primary Google Gemini API key | `""` | `AIzaSy...` |
 | `GEMINI_API_KEY_2` | Secondary Google Gemini key (failover) | `""` | `AIzaSy...` |
-| `GEMINI_MODEL` | LiteLLM Gemini model identifier | `gemini/gemini-2.0-flash` | `gemini/gemini-2.0-flash` |
+| `GEMINI_MODEL` | LiteLLM Gemini model identifier | `gemini/gemini-3.5-flash` | `gemini/gemini-3.5-flash` |
 | `DATABASE_URL` | SQLAlchemy connection URL | `sqlite:///./data/app.db` | Local: `sqlite:///./data/app.db`<br>Docker: `sqlite:////data/app.db` |
 | `ENABLE_FAILURE_SIMULATION`| Enable `X-Simulate-Failure` header | `false` | `true` or `false` |
 | `CORS_ORIGINS` | Allowed origins (wildcard, comma, JSON) | `*` | `*` or `http://localhost:3000,https://my.app` |
@@ -301,7 +301,7 @@ npm run build
 3. Environment Variables:
    - `GEMINI_API_KEY_1`: `<your_key>`
    - `GEMINI_API_KEY_2`: `<your_second_key>`
-   - `GEMINI_MODEL`: `gemini/gemini-2.0-flash`
+   - `GEMINI_MODEL`: `gemini/gemini-3.5-flash`
    - `DATABASE_URL`: `sqlite:////data/app.db` *(or `sqlite:////tmp/app.db` on free tier)*
    - `CORS_ORIGINS`: `https://your-frontend-app.vercel.app`
    - `ENABLE_FAILURE_SIMULATION`: `false`

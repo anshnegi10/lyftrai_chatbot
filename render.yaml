@@ -18,7 +18,7 @@ services:
       - key: GEMINI_API_KEY_2
         sync: false
       - key: GEMINI_MODEL
-        value: gemini/gemini-2.5-flash
+        value: gemini/gemini-3.5-flash
       - key: DATABASE_URL
         value: sqlite:////tmp/app.db
       - key: ENABLE_FAILURE_SIMULATION

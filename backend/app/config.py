@@ -55,7 +55,7 @@ def parse_cors_origins(v: Any) -> List[str]:
 class Settings(BaseSettings):
     GEMINI_API_KEY_1: str = ""
     GEMINI_API_KEY_2: str = ""
-    GEMINI_MODEL: str = "gemini/gemini-2.0-flash"
+    GEMINI_MODEL: str = "gemini/gemini-3.5-flash"
     DATABASE_URL: str = "sqlite:///./data/app.db"
     ENABLE_FAILURE_SIMULATION: bool = False
     CORS_ORIGINS: Union[List[str], str] = ["*"]
