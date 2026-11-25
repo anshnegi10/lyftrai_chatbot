@@ -11,27 +11,34 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
-# Ensure environment vars are set before importing app modules
-os.environ.setdefault("GEMINI_API_KEY_1", "test-key-1")
-os.environ.setdefault("GEMINI_API_KEY_2", "test-key-2")
-os.environ.setdefault("DATABASE_URL", "sqlite:///./test.db")
+# Ensure environment vars are set BEFORE importing any app modules
+# Using pure in-memory SQLite with StaticPool prevents any test.db on disk
+os.environ["GEMINI_API_KEY_1"] = "test-key-1"
+os.environ["GEMINI_API_KEY_2"] = "test-key-2"
+os.environ["DATABASE_URL"] = "sqlite:///:memory:"
 
-# Now safe to import app
+import app.database as app_db
 from app.database import Base, get_db
 from app.main import app
 from app.services.cache_service import initialize_cache
 
 # ---------------------------------------------------------------------------
-# In-memory SQLite for tests
+# In-memory SQLite with StaticPool for tests
 # ---------------------------------------------------------------------------
-TEST_DATABASE_URL = "sqlite://"  # pure in-memory
+TEST_DATABASE_URL = "sqlite:///:memory:"
 
 test_engine = create_engine(
     TEST_DATABASE_URL,
     connect_args={"check_same_thread": False},
+    poolclass=StaticPool,
 )
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
+
+# Bind the global database engine to test_engine to ensure total isolation
+app_db.engine = test_engine
+app_db.SessionLocal = TestingSessionLocal
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -40,24 +47,31 @@ def _create_test_tables():
     Base.metadata.create_all(bind=test_engine)
     yield
     Base.metadata.drop_all(bind=test_engine)
+    # Clean up test.db if anything created it
+    for fname in ("test.db", "test.db-wal", "test.db-shm"):
+        if os.path.exists(fname):
+            try:
+                os.remove(fname)
+            except OSError:
+                pass
 
 
 @pytest.fixture()
 def db_session():
-    """Fresh DB session per test, rolled back after."""
-    connection = test_engine.connect()
-    transaction = connection.begin()
-    session = TestingSessionLocal(bind=connection)
-    yield session
-    session.close()
-    transaction.rollback()
-    connection.close()
+    """Fresh DB session per test, tables cleared before each test."""
+    from app.models import Message
+    session = TestingSessionLocal()
+    session.query(Message).delete()
+    session.commit()
+    try:
+        yield session
+    finally:
+        session.close()
 
 
 @pytest.fixture()
 def client(db_session):
     """TestClient with DB and cache overridden."""
-    # Initialize cache silently
     try:
         initialize_cache()
     except Exception:
@@ -88,8 +102,10 @@ def make_mock_response(
 ):
     """Return a MagicMock that looks like a litellm ModelResponse."""
     response = MagicMock()
-    response.choices = [MagicMock()]
-    response.choices[0].message.content = content
+    choice = MagicMock()
+    choice.message = MagicMock()
+    choice.message.content = content
+    response.choices = [choice]
     response.usage = MagicMock()
     response.usage.prompt_tokens = prompt_tokens
     response.usage.completion_tokens = completion_tokens

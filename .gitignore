@@ -1,6 +1,9 @@
 # Environment
 .env
+.env.*
+*.env
 *.env.local
+frontend/.env*
 
 # Python
 __pycache__/
@@ -21,11 +24,15 @@ env/
 
 # Node
 node_modules/
+frontend/node_modules/
 frontend/dist/
 frontend/build/
+.vitest/
 
-# SQLite
+# SQLite Databases & WAL journal files
 *.db
+*.db-wal
+*.db-shm
 *.sqlite
 *.sqlite3
 
@@ -45,3 +52,4 @@ logs/
 
 # Data
 /data/
+data/

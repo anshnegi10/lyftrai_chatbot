@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import uuid
 from typing import Any, Dict, List, Optional
@@ -24,7 +25,7 @@ from app.schemas import (
 from app.services import conversation_service as conv_svc
 from app.services.llm_service import (
     AllProvidersFailedError,
-    MODEL_NAME,
+    ProviderClientError,
     call_with_failover,
     parse_simulate_header,
 )
@@ -32,6 +33,8 @@ from app.services.llm_service import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+SESSION_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +72,7 @@ async def chat(
     start_time = time.monotonic()
 
     # Parse failure simulation header
-    simulate_failures: Optional[Dict[str, int]] = None
+    simulate_failures: Optional[Dict[str, Any]] = None
     is_simulation = (
         settings.ENABLE_FAILURE_SIMULATION
         and x_simulate_failure is not None
@@ -77,8 +80,10 @@ async def chat(
     if is_simulation:
         simulate_failures = parse_simulate_header(x_simulate_failure)
 
-    # Load conversation history
-    history = conv_svc.get_session_history(request.session_id, db)
+    # Load bounded conversation history for context window safety
+    history = conv_svc.get_session_history(
+        request.session_id, db, limit=settings.MAX_HISTORY_MESSAGES
+    )
 
     # Build messages
     messages = _build_messages(request.system_prompt, history, request.message)
@@ -99,6 +104,8 @@ async def chat(
         )
     except AllProvidersFailedError:
         raise HTTPException(status_code=503, detail="all providers unavailable")
+    except ProviderClientError as client_err:
+        raise HTTPException(status_code=client_err.status_code, detail=client_err.message)
 
     elapsed_ms = int((time.monotonic() - start_time) * 1000)
 
@@ -109,10 +116,15 @@ async def chat(
     except Exception:
         pass
 
-    # Extract reply text
-    reply_text: str = response.choices[0].message.content or ""
+    # Extract reply text safely
+    reply_text = ""
+    try:
+        reply_text = response.choices[0].message.content or ""
+    except Exception as exc:
+        logger.error("Failed to extract content from provider response: %s", exc)
+        raise HTTPException(status_code=502, detail="Invalid provider response format")
 
-    # Extract token usage
+    # Extract token usage safely
     input_tokens: int = 0
     output_tokens: int = 0
     try:
@@ -133,7 +145,7 @@ async def chat(
 
     metadata = MessageMetadata(
         resolution_source=resolution_source,
-        model=MODEL_NAME,
+        model=settings.GEMINI_MODEL,
         latency_ms=elapsed_ms,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
@@ -141,18 +153,17 @@ async def chat(
         fallback_attempts=response_fallback,
     )
 
-    # Persist to DB
-    conv_svc.save_message(request.session_id, "user", request.message, None, db)
-    conv_svc.save_message(
-        request.session_id,
-        "assistant",
-        reply_text,
-        {
+    # Persist turn atomically in a single transaction
+    conv_svc.save_conversation_turn(
+        session_id=request.session_id,
+        user_content=request.message,
+        assistant_content=reply_text,
+        assistant_metadata={
             "resolution_source": resolution_source,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
         },
-        db,
+        db=db,
     )
 
     return ChatResponse(
@@ -169,6 +180,9 @@ async def chat(
 
 @router.get("/sessions/{session_id}/messages", response_model=SessionHistory)
 def get_session_messages(session_id: str, db: Session = Depends(get_db)):
+    if not SESSION_ID_PATTERN.match(session_id):
+        raise HTTPException(status_code=400, detail="Invalid session_id format")
+
     if not conv_svc.session_exists(session_id, db):
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
 
@@ -176,7 +190,7 @@ def get_session_messages(session_id: str, db: Session = Depends(get_db)):
 
     out_messages: List[MessageOut] = []
     for record in history:
-        # Skip system prompt rows (we never store them, but guard anyway)
+        # Skip system prompt rows if any were present
         if record.role == "system":
             continue
         msg_meta: Optional[MessageOutMetadata] = None

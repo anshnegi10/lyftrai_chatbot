@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import logging
 import sys
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
 from app.config import settings
-from app.database import create_tables, engine, get_db
+from app.database import create_tables, engine
 from app.services.cache_service import initialize_cache, is_cache_enabled
 
 # ---------------------------------------------------------------------------
@@ -22,6 +24,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Lifespan
+# ---------------------------------------------------------------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Starting Lyftr AI backend...")
+    create_tables()
+    initialize_cache()
+    logger.info("Startup complete.")
+    yield
+
+
 # ---------------------------------------------------------------------------
 # App creation
 # ---------------------------------------------------------------------------
@@ -30,44 +45,32 @@ app = FastAPI(
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
-# CORS
+# CORS configuration
+is_wildcard = "*" in settings.CORS_ORIGINS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
-    allow_credentials=True,
+    allow_credentials=not is_wildcard,  # Spec disallows credentials when origin is '*'
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# ---------------------------------------------------------------------------
-# Startup / shutdown
-# ---------------------------------------------------------------------------
-
-
-@app.on_event("startup")
-async def startup_event() -> None:
-    logger.info("Starting Lyftr AI backend…")
-    create_tables()
-    initialize_cache()
-    logger.info("Startup complete.")
 
 
 # ---------------------------------------------------------------------------
 # Health endpoint
 # ---------------------------------------------------------------------------
-
-
 @app.get("/health")
 def health():
-    # Verify DB reachable
+    # Verify DB reachable without leaking internal error strings
     try:
         with engine.connect() as conn:
-            conn.execute(__import__("sqlalchemy").text("SELECT 1"))
+            conn.execute(text("SELECT 1"))
     except Exception as exc:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=503, detail=f"Database unreachable: {exc}")
+        logger.error("Health check DB connection failed: %s", exc)
+        raise HTTPException(status_code=503, detail="Database unreachable")
 
     keys_configured = sum(
         1
@@ -75,7 +78,6 @@ def health():
         if k and k.strip()
     )
     if keys_configured == 0:
-        from fastapi import HTTPException
         raise HTTPException(status_code=503, detail="No API keys configured")
 
     return {

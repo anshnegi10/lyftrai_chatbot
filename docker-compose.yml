@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   backend:
     build:
@@ -12,6 +10,7 @@ services:
     environment:
       - GEMINI_API_KEY_1=${GEMINI_API_KEY_1}
       - GEMINI_API_KEY_2=${GEMINI_API_KEY_2}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini/gemini-2.0-flash}
       - DATABASE_URL=sqlite:////data/app.db
       - ENABLE_FAILURE_SIMULATION=${ENABLE_FAILURE_SIMULATION:-true}
       - CORS_ORIGINS=${CORS_ORIGINS:-*}
@@ -28,6 +27,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       args:
+        # Note: VITE_API_URL is baked into the frontend bundle at build-time
         - VITE_API_URL=${VITE_API_URL:-http://localhost:8000}
     ports:
       - "3000:80"

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
+
+SESSION_ID_REGEX = r"^[a-zA-Z0-9_-]+$"
 
 
 # ---------------------------------------------------------------------------
@@ -11,9 +14,9 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class ChatRequest(BaseModel):
-    session_id: str = Field(..., min_length=1, max_length=128)
+    session_id: str = Field(..., min_length=1, max_length=128, pattern=SESSION_ID_REGEX)
     message: str = Field(..., min_length=1, max_length=4000)
-    system_prompt: Optional[str] = None
+    system_prompt: Optional[str] = Field(None, max_length=2000)
 
     @field_validator("message", mode="before")
     @classmethod
@@ -22,6 +25,14 @@ class ChatRequest(BaseModel):
         if not stripped:
             raise ValueError("message must not be empty after stripping whitespace")
         return stripped
+
+    @field_validator("system_prompt", mode="before")
+    @classmethod
+    def _clean_system_prompt(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        stripped = v.strip() if isinstance(v, str) else v
+        return stripped if stripped else None
 
 
 # ---------------------------------------------------------------------------
