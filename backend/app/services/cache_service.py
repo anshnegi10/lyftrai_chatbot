@@ -18,6 +18,12 @@ def initialize_cache() -> bool:
     try:
         from litellm.caching.caching import Cache
 
+        # Compatibility fix for openai/typing where TranscriptionCreateParams lacks __annotations__
+        try:
+            Cache._get_litellm_supported_transcription_kwargs = lambda self: set()
+        except Exception:
+            pass
+
         litellm.cache = Cache(type="local")
         litellm.enable_cache()
         _cache_initialized = True
