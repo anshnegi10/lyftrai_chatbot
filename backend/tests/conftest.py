@@ -111,3 +111,14 @@ def make_mock_response(
     response.usage.completion_tokens = completion_tokens
     response._hidden_params = {"cache_hit": cache_hit}
     return response
+
+
+async def make_mock_stream(tokens=("Hello", " world", "!")):
+    """Async generator yielding chunks matching litellm streaming output."""
+    for t in tokens:
+        chunk = MagicMock()
+        choice = MagicMock()
+        choice.delta = MagicMock()
+        choice.delta.content = t
+        chunk.choices = [choice]
+        yield chunk

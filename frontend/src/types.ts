@@ -5,6 +5,8 @@ export interface Message {
   metadata?: MessageMetadata;
   timestamp: Date;
   isLoading?: boolean;
+  isStreaming?: boolean;
+  isError?: boolean;
 }
 
 export interface MessageMetadata {
@@ -32,4 +34,11 @@ export interface ChatResponse {
 export interface ApiError {
   detail: string;
   status?: number;
+}
+
+export interface ConversationSummary {
+  id: string;
+  title: string;
+  timestamp: Date;
+  messageCount: number;
 }

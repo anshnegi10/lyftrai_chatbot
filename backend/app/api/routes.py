@@ -10,6 +10,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -28,6 +29,7 @@ from app.services.llm_service import (
     ProviderClientError,
     call_with_failover,
     parse_simulate_header,
+    stream_with_failover,
 )
 
 logger = logging.getLogger(__name__)
@@ -174,12 +176,123 @@ async def chat(
 
 
 # ---------------------------------------------------------------------------
+# POST /chat/stream — Live token streaming via Server-Sent Events (SSE)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/chat/stream")
+async def chat_stream(
+    request: ChatRequest,
+    raw_request: Request,
+    x_simulate_failure: Optional[str] = Header(default=None, alias="X-Simulate-Failure"),
+    db: Session = Depends(get_db),
+):
+    start_time = time.monotonic()
+
+    # Parse failure simulation header
+    simulate_failures: Optional[Dict[str, Any]] = None
+    is_simulation = (
+        settings.ENABLE_FAILURE_SIMULATION
+        and x_simulate_failure is not None
+    )
+    if is_simulation:
+        simulate_failures = parse_simulate_header(x_simulate_failure)
+
+    # Load bounded conversation history for context window safety
+    history = conv_svc.get_session_history(
+        request.session_id, db, limit=settings.MAX_HISTORY_MESSAGES
+    )
+
+    # Build messages
+    messages = _build_messages(request.system_prompt, history, request.message)
+
+    # Bypass cache for simulated requests by injecting a unique nonce
+    if is_simulation:
+        nonce_msg = {
+            "role": "system",
+            "content": f"__simulation_nonce__={uuid.uuid4().hex}",
+        }
+        messages = messages + [nonce_msg]
+
+    async def sse_event_generator():
+        accumulated_text = []
+        try:
+            async for event in stream_with_failover(
+                messages=messages,
+                simulate_failures=simulate_failures,
+            ):
+                if await raw_request.is_disconnected():
+                    logger.info("Client disconnected during stream for session %s", request.session_id)
+                    return
+
+                if event["type"] == "token":
+                    token = event["token"]
+                    accumulated_text.append(token)
+                    payload = json.dumps({"token": token})
+                    yield f"data: {payload}\n\n"
+
+                elif event["type"] == "done":
+                    full_reply = event["full_text"]
+                    elapsed_ms = int((time.monotonic() - start_time) * 1000)
+
+                    # Atomically save turn in DB only on full successful stream completion
+                    try:
+                        conv_svc.save_conversation_turn(
+                            session_id=request.session_id,
+                            user_content=request.message,
+                            assistant_content=full_reply,
+                            assistant_metadata={
+                                "resolution_source": "LIVE_INFERENCE",
+                                "input_tokens": event["input_tokens"],
+                                "output_tokens": event["output_tokens"],
+                            },
+                            db=db,
+                        )
+                    except Exception as persist_err:
+                        logger.error("Failed to persist streaming turn: %s", persist_err)
+
+                    meta = {
+                        "resolution_source": "LIVE_INFERENCE",
+                        "model": settings.GEMINI_MODEL,
+                        "latency_ms": elapsed_ms,
+                        "input_tokens": event["input_tokens"],
+                        "output_tokens": event["output_tokens"],
+                        "key_id": event["key_id"],
+                        "fallback_attempts": event["fallback_attempts"],
+                    }
+                    yield f"data: {json.dumps({'metadata': meta})}\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
+
+        except AllProvidersFailedError:
+            err_payload = json.dumps({"error": "All AI providers are currently unavailable. Please try again later."})
+            yield f"data: {err_payload}\n\n"
+        except ProviderClientError as pce:
+            err_payload = json.dumps({"error": pce.message})
+            yield f"data: {err_payload}\n\n"
+        except Exception as exc:
+            logger.error("Streaming error: %s", exc)
+            err_payload = json.dumps({"error": "Connection interrupted. Please try again."})
+            yield f"data: {err_payload}\n\n"
+
+    return StreamingResponse(
+        sse_event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
 # GET /sessions/{session_id}/messages
 # ---------------------------------------------------------------------------
 
 
 @router.get("/sessions/{session_id}/messages", response_model=SessionHistory)
-def get_session_messages(session_id: str, db: Session = Depends(get_db)):
+async def get_session_messages(session_id: str, db: Session = Depends(get_db)):
     if not SESSION_ID_PATTERN.match(session_id):
         raise HTTPException(status_code=400, detail="Invalid session_id format")
 

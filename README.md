@@ -1,8 +1,8 @@
-# Lyftr AI — Full-Stack LLM Chatbot with Dual-Key Failover & Caching
+# Lyftr AI 2.0 — Premium AI Assistant & Streaming Inference Engine
 
 A production-ready full-stack AI chatbot application built with React 19, TypeScript, Vite, Tailwind CSS, FastAPI, LiteLLM, Google Gemini, and SQLite (SQLAlchemy ORM with WAL mode).
 
-Features sequential multi-key failover across Gemini API keys, process-local in-memory response caching, atomic conversation turn persistence, per-response token tracking, failure simulation for evaluation, and responsive design.
+Features real-time token streaming via Server-Sent Events (SSE), sequential multi-key failover across Gemini API keys, rich Markdown rendering with syntax-highlighted code blocks, contextual follow-up suggestions, response regeneration, feedback buttons, process-local in-memory response caching, atomic conversation turn persistence, per-response token tracking, and responsive dark-mode design.
 
 ---
 
@@ -45,7 +45,15 @@ Features sequential multi-key failover across Gemini API keys, process-local in-
 
 ## 2. Public API Specification
 
-The backend exposes three core endpoints adhering strictly to the evaluator contract:
+The backend exposes core endpoints adhering strictly to the evaluator contract:
+
+### `POST /chat/stream` *(Lyftr AI 2.0 Live Token Streaming)*
+Streams chat tokens in real-time via Server-Sent Events (SSE) with automatic provider failover.
+- **Headers**:
+  - `Content-Type: application/json`
+  - `Accept: text/event-stream`
+- **Request Body**: Same schema as `POST /chat`.
+- **Response**: `text/event-stream` delivering JSON chunks (`data: {"token": "..."}\n\n`), terminal metadata (`data: {"metadata": {...}}\n\n`), and completion signal (`data: [DONE]\n\n`).
 
 ### `POST /chat`
 Executes chat completion with multi-key failover and caching.

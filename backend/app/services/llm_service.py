@@ -318,3 +318,123 @@ async def call_with_failover(
     safe_error_msg = scrub_secrets(str(last_error)) if last_error else "all providers unavailable"
     logger.error("All providers exhausted. Last error: %s", safe_error_msg)
     raise AllProvidersFailedError("all providers unavailable") from last_error
+
+
+# ---------------------------------------------------------------------------
+# Streaming failover function
+# ---------------------------------------------------------------------------
+
+
+async def stream_with_failover(
+    messages: List[Dict[str, Any]],
+    simulate_failures: Optional[Dict[str, Union[int, str]]] = None,
+):
+    """
+    Stream LLM response tokens across configured keys with automatic failover.
+    Yields events:
+      {"type": "token", "token": str}
+      {"type": "done", "full_text": str, "key_id": str, "fallback_attempts": int, "input_tokens": int, "output_tokens": int}
+    """
+    configured_keys = []
+    if settings.GEMINI_API_KEY_1 and settings.GEMINI_API_KEY_1.strip():
+        configured_keys.append({"key_id": "key_1", "api_key": settings.GEMINI_API_KEY_1.strip()})
+    if settings.GEMINI_API_KEY_2 and settings.GEMINI_API_KEY_2.strip():
+        configured_keys.append({"key_id": "key_2", "api_key": settings.GEMINI_API_KEY_2.strip()})
+
+    if not configured_keys:
+        logger.warning("No Gemini API keys configured.")
+        raise AllProvidersFailedError("all providers unavailable")
+
+    fallback_attempts = 0
+    last_error: Optional[Exception] = None
+
+    for idx, key_info in enumerate(configured_keys):
+        key_id = key_info["key_id"]
+        api_key = key_info["api_key"]
+
+        if idx > 0:
+            fallback_attempts += 1
+
+        # Failure simulation check
+        if simulate_failures:
+            sim_code = _should_simulate(key_id, simulate_failures)
+            if sim_code is not None:
+                logger.info("Simulating %s failure for %s in stream", sim_code, key_id)
+                sim_exc = _make_simulated_exception(sim_code, key_id)
+                if isinstance(sim_exc, BadRequestError):
+                    raise ProviderClientError(
+                        message=f"Simulated bad request for {key_id}", status_code=400
+                    )
+                last_error = sim_exc
+                continue
+
+        try:
+            response = await litellm.acompletion(
+                model=settings.GEMINI_MODEL,
+                messages=messages,
+                api_key=api_key,
+                stream=True,
+                timeout=45.0,
+                num_retries=0,
+            )
+
+            full_reply_parts = []
+            input_tokens_est = sum(len(str(m.get("content", ""))) for m in messages) // 4
+            output_tokens_est = 0
+
+            # Iterate over the async stream generator
+            async for chunk in response:
+                if not hasattr(chunk, "choices") or not chunk.choices:
+                    continue
+                delta = getattr(chunk.choices[0], "delta", None)
+                if not delta:
+                    continue
+                content = getattr(delta, "content", "") or ""
+                if content:
+                    full_reply_parts.append(content)
+                    output_tokens_est += max(1, len(content) // 4)
+                    yield {"type": "token", "token": content}
+
+            full_text = "".join(full_reply_parts)
+            yield {
+                "type": "done",
+                "full_text": full_text,
+                "key_id": key_id,
+                "fallback_attempts": fallback_attempts,
+                "input_tokens": input_tokens_est,
+                "output_tokens": max(output_tokens_est, len(full_text) // 4),
+            }
+            return
+        except ProviderClientError:
+            raise
+        except Exception as exc:
+            scrubbed = scrub_secrets(str(exc))
+            if isinstance(exc, NotFoundError):
+                logger.warning("Key %s returned NotFoundError: %s", key_id, scrubbed)
+                raise ProviderClientError(
+                    message=(
+                        f"The configured model '{settings.GEMINI_MODEL}' was not found or has been retired. "
+                        "Update GEMINI_MODEL to a currently supported model."
+                    ),
+                    status_code=404,
+                    category=ERROR_CATEGORY_MODEL_NOT_FOUND,
+                )
+            if isinstance(exc, BadRequestError):
+                logger.warning("Key %s returned non-retryable BadRequest: %s", key_id, scrubbed)
+                raise ProviderClientError(
+                    message=scrubbed,
+                    status_code=getattr(exc, "status_code", 400),
+                    category=ERROR_CATEGORY_BAD_REQUEST,
+                )
+
+            if is_retryable_error(exc):
+                logger.warning("Key %s stream failed with retryable error: %s", key_id, scrubbed)
+                last_error = exc
+                continue
+
+            logger.error("Key %s stream failed with non-retryable error: %s", key_id, scrubbed)
+            raise
+
+    safe_error_msg = scrub_secrets(str(last_error)) if last_error else "all providers unavailable"
+    logger.error("All providers exhausted during streaming. Last error: %s", safe_error_msg)
+    raise AllProvidersFailedError("all providers unavailable") from last_error

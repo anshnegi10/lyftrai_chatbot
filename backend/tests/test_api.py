@@ -433,3 +433,68 @@ class TestIsolationAndCacheBehavior:
             m["role"] == "system" and m["content"].startswith("__simulation_nonce__=")
             for m in sent_messages
         )
+
+
+# ===========================================================================
+# 9. POST /chat/stream — Streaming endpoint tests
+# ===========================================================================
+
+
+class TestChatStream:
+    @patch("app.services.llm_service.litellm.acompletion")
+    def test_stream_returns_sse_and_persists(self, mock_llm, client):
+        from tests.conftest import make_mock_stream
+
+        mock_llm.side_effect = lambda **kwargs: make_mock_stream(["Hello", " streaming", " world!"])
+
+        resp = client.post(
+            "/chat/stream",
+            json={"session_id": "s-stream-1", "message": "Stream test"},
+        )
+        assert resp.status_code == 200
+        assert "text/event-stream" in resp.headers["content-type"]
+        text_body = resp.text
+
+        # Verify tokens were emitted in SSE format
+        assert 'data: {"token": "Hello"}' in text_body
+        assert 'data: {"token": " streaming"}' in text_body
+        assert 'data: {"token": " world!"}' in text_body
+        assert "data: [DONE]" in text_body
+
+        # Verify persistence in DB
+        hist_resp = client.get("/sessions/s-stream-1/messages")
+        assert hist_resp.status_code == 200
+        msgs = hist_resp.json()["messages"]
+        assert len(msgs) == 2
+        assert msgs[0]["role"] == "user"
+        assert msgs[0]["content"] == "Stream test"
+        assert msgs[1]["role"] == "assistant"
+        assert msgs[1]["content"] == "Hello streaming world!"
+
+    @patch("app.services.llm_service.litellm.acompletion")
+    def test_stream_failover_to_key2(self, mock_llm, client):
+        from tests.conftest import make_mock_stream
+        from litellm.exceptions import RateLimitError
+
+        call_count = 0
+
+        def side_effect(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if kwargs.get("api_key") == "test-key-1":
+                raise RateLimitError(
+                    message="Rate limit key 1", model=settings.GEMINI_MODEL, llm_provider="google"
+                )
+            return make_mock_stream(["Recovered", " on key 2"])
+
+        mock_llm.side_effect = side_effect
+
+        resp = client.post(
+            "/chat/stream",
+            json={"session_id": "s-stream-failover", "message": "Failover stream"},
+        )
+        assert resp.status_code == 200
+        assert 'data: {"token": "Recovered"}' in resp.text
+        assert 'data: {"token": " on key 2"}' in resp.text
+        assert "data: [DONE]" in resp.text
+        assert call_count == 2

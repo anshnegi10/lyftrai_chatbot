@@ -66,7 +66,7 @@ app.add_middleware(
 # GET /health/provider for a lightweight provider configuration check.
 # ---------------------------------------------------------------------------
 @app.get("/health")
-def health():
+async def health():
     # Verify DB reachable without leaking internal error strings
     try:
         with engine.connect() as conn:
@@ -97,7 +97,7 @@ def health():
 # the Gemini endpoint is reachable.
 # ---------------------------------------------------------------------------
 @app.get("/health/provider")
-def health_provider():
+async def health_provider():
     keys_configured = sum(
         1
         for k in (settings.GEMINI_API_KEY_1, settings.GEMINI_API_KEY_2)
